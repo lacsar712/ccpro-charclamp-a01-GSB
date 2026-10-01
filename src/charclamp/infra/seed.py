@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from charclamp.domain.models import BurnShift, Clamp, Site, User, utcnow
+from charclamp.domain.models import BurnShift, Clamp, OxygenReading, Site, User, utcnow
 from charclamp.infra.db import SyncSessionLocal
 from charclamp.infra.security import hash_password
 
@@ -62,6 +62,26 @@ def seed_demo() -> None:
                     peak_temp_c=520.0,
                     charcoal_grade="A+",
                     notes="已出炭班次",
+                ),
+            ]
+        )
+
+        # 坞东-甲焖烧中：只备 2 条烟囱测氧（不足 4 条，仍不能出炭）
+        session.add_all(
+            [
+                OxygenReading(
+                    clamp=c1,
+                    seq=1,
+                    oxygen_pct=14.0,
+                    collected_at=now - timedelta(hours=6),
+                    operator="老炉头",
+                ),
+                OxygenReading(
+                    clamp=c1,
+                    seq=2,
+                    oxygen_pct=9.5,
+                    collected_at=now - timedelta(hours=1),
+                    operator="青禾",
                 ),
             ]
         )

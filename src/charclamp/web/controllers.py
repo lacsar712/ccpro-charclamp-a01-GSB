@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from litestar import Controller, MediaType, Request, get, post
@@ -8,10 +8,16 @@ from litestar.enums import RequestEncodingType
 from litestar.params import Body
 from litestar.response import Redirect, Template
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
-from charclamp.domain.models import BurnShift, Clamp, User
-from charclamp.domain.rules import RuleError, assert_can_set_clamp_status, can_mark_clamp_drawn
+from charclamp.domain.models import BurnShift, Clamp, OxygenReading, User
+from charclamp.domain.rules import (
+    RuleError,
+    assert_can_set_clamp_status,
+    can_mark_clamp_drawn,
+    validate_oxygen_reading,
+)
 from charclamp.infra.db import SessionLocal
 from charclamp.infra.security import verify_password
 
@@ -53,7 +59,11 @@ async def _load_timeline_context(clamp_id: int | None = None) -> dict[str, Any]:
             (
                 await db.execute(
                     select(Clamp)
-                    .options(selectinload(Clamp.site), selectinload(Clamp.shifts))
+                    .options(
+                        selectinload(Clamp.site),
+                        selectinload(Clamp.shifts),
+                        selectinload(Clamp.oxygen_readings),
+                    )
                     .order_by(Clamp.code)
                 )
             )
@@ -172,7 +182,11 @@ class TimelineController(Controller):
             result = await db.execute(
                 select(Clamp)
                 .where(Clamp.id == clamp_id)
-                .options(selectinload(Clamp.shifts), selectinload(Clamp.site))
+                .options(
+                    selectinload(Clamp.shifts),
+                    selectinload(Clamp.oxygen_readings),
+                    selectinload(Clamp.site),
+                )
             )
             clamp = result.scalar_one_or_none()
             if not clamp:
@@ -244,7 +258,7 @@ class ClampController(Controller):
             result = await db.execute(
                 select(Clamp)
                 .where(Clamp.id == clamp_id)
-                .options(selectinload(Clamp.shifts))
+                .options(selectinload(Clamp.shifts), selectinload(Clamp.oxygen_readings))
             )
             clamp = result.scalar_one_or_none()
             if not clamp:
@@ -257,3 +271,119 @@ class ClampController(Controller):
             except RuleError as exc:
                 _set_flash(request, str(exc), "error")
         return Redirect(f"/?clamp_id={clamp_id}")
+
+
+class OxygenController(Controller):
+    """烟囱测氧簿专页：按窑下拉的簿页 + 新增测氧表。"""
+
+    path = "/oxygen"
+    tags = ["oxygen"]
+
+    @get("/", media_type=MediaType.HTML)
+    async def oxygen_book(self, request: Request) -> Template | Redirect:
+        if not request.user:
+            return Redirect("/login")
+        flash, flash_cat = _pop_flash(request)
+        clamp_id = _parse_optional_int(request.query_params.get("clamp_id"))
+        async with SessionLocal() as db:
+            clamps = list(
+                (
+                    await db.execute(
+                        select(Clamp)
+                        .options(
+                            selectinload(Clamp.site),
+                            selectinload(Clamp.oxygen_readings),
+                        )
+                        .order_by(Clamp.code)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            selected = next((c for c in clamps if c.id == clamp_id), None)
+            readings = sorted(selected.oxygen_readings, key=lambda r: r.seq) if selected else []
+            site_name = clamps[0].site.name if clamps else "乌石岗焖烧坞"
+        next_seq = readings[-1].seq + 1 if readings else 1
+        now_local = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+        return Template(
+            template_name="oxygen.html",
+            context={
+                "clamps": clamps,
+                "selected": selected,
+                "readings": readings,
+                "next_seq": next_seq,
+                "now_local": now_local,
+                "status_labels": STATUS_LABELS,
+                "site_name": site_name,
+                "user": request.user,
+                "flash": flash,
+                "flash_cat": flash_cat,
+            },
+        )
+
+    @post("/new")
+    async def create_reading(
+        self,
+        request: Request,
+        data: dict[str, Any] = Body(media_type=RequestEncodingType.URL_ENCODED),
+    ) -> Redirect:
+        if not request.user:
+            return Redirect("/login")
+        clamp_id = _parse_optional_int(data.get("clamp_id"))
+        redirect_to = f"/oxygen/?clamp_id={clamp_id}" if clamp_id is not None else "/oxygen/"
+
+        try:
+            if clamp_id is None:
+                raise RuleError("请先在下拉中选择炭窑")
+            seq = _parse_optional_int((data.get("seq") or "").strip())
+            if seq is None:
+                raise RuleError("测次必须是从 1 起的正整数")
+            oxygen_raw = (data.get("oxygen_pct") or "").strip()
+            try:
+                oxygen_pct = float(oxygen_raw)
+            except ValueError:
+                raise RuleError("烟囱氧百分必须为正且不超过 21") from None
+            collected_raw = (data.get("collected_at") or "").strip()
+            try:
+                collected_at = datetime.fromisoformat(collected_raw)
+            except ValueError:
+                raise RuleError("请填写采集时刻") from None
+            if collected_at.tzinfo is None:
+                # datetime-local 提交为朴素时间，按窑场本地时区基准 UTC 落库
+                collected_at = collected_at.replace(tzinfo=timezone.utc)
+            operator = (data.get("operator") or "").strip()
+
+            async with SessionLocal() as db:
+                result = await db.execute(
+                    select(Clamp)
+                    .where(Clamp.id == clamp_id)
+                    .options(selectinload(Clamp.oxygen_readings))
+                )
+                clamp = result.scalar_one_or_none()
+                if not clamp:
+                    raise RuleError("炭窑不存在")
+                # 规则先行（窑态、字段、同窑测次），唯一约束再兜并发
+                validate_oxygen_reading(clamp, seq, oxygen_pct, collected_at, operator)
+                db.add(
+                    OxygenReading(
+                        clamp_id=clamp.id,
+                        seq=seq,
+                        oxygen_pct=oxygen_pct,
+                        collected_at=collected_at,
+                        operator=operator,
+                    )
+                )
+                try:
+                    await db.commit()
+                except IntegrityError:
+                    # 两名操作工同时交同一测次：唯一约束只放一笔，此笔挡下
+                    await db.rollback()
+                    raise RuleError(
+                        f"第 {seq} 测刚被同事抢先记入簿中，本笔未落簿，请改填下一测次"
+                    ) from None
+        except RuleError as exc:
+            _set_flash(request, str(exc), "error")
+            return Redirect(redirect_to)
+
+        _set_flash(request, f"第 {seq} 测烟囱测氧已入簿", "ok")
+        return Redirect(redirect_to)

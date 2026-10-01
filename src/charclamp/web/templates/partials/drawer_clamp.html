@@ -12,6 +12,11 @@
     <p class="hint">{{ clamp.notes }}</p>
     {% endif %}
 
+    {% set readings = clamp.oxygen_readings | sort(attribute='seq') %}
+    <div class="drawer-o2-summary">
+      <span class="hint">烟囱测氧簿：{{ readings|length }} 条{% if readings %} · 最新第 {{ readings[-1].seq }} 测 {{ '%g'|format(readings[-1].oxygen_pct) }}%{% endif %}</span>
+    </div>
+
     <div class="drawer-actions-stack">
       <button
         type="button"
@@ -20,6 +25,8 @@
         hx-target="#drawer-root"
         hx-swap="innerHTML"
       >为本窑登记班次</button>
+
+      <a class="btn ghost" href="/oxygen/?clamp_id={{ clamp.id }}" onclick="closeDrawer()">打开烟囱测氧簿</a>
 
       {% if clamp.status != 'drawn' %}
       <form method="post" action="/clamps/{{ clamp.id }}/status">
@@ -31,7 +38,7 @@
       {% if not can_drawn %}
       <p class="hint warn">{{ drawn_msg }}</p>
       {% else %}
-      <p class="hint">最近班次峰值已达标（≥ 400℃），可标记出炭。</p>
+      <p class="hint">双门槛均已满足：最近班次峰值 ≥ 400℃；测氧连续 ≥ 4 条、最新氧 ≤ 8% 且采集晚于最近一班开始，可标记出炭。</p>
       {% endif %}
       {% else %}
       <form method="post" action="/clamps/{{ clamp.id }}/status">

@@ -32,6 +32,9 @@
         <circle class="kiln-glow" cx="24" cy="34" r="4" />
         <text x="24" y="14" text-anchor="middle" class="kiln-code-svg">{{ clamp.code[-1] }}</text>
       </svg>
+      {% if clamp.oxygen_readings %}
+      <span class="kiln-o2-badge" title="已测 {{ clamp.oxygen_readings|length }} 条烟囱氧">O₂ {{ clamp.oxygen_readings|length }}</span>
+      {% endif %}
     </span>
     <span class="kiln-meta">
       <strong>{{ clamp.code }}</strong>

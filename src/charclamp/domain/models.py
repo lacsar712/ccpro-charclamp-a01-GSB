@@ -54,6 +54,10 @@ class Clamp(Base):
         back_populates="clamp",
         cascade="all, delete-orphan",
     )
+    oxygen_readings: Mapped[list[OxygenReading]] = relationship(
+        back_populates="clamp",
+        cascade="all, delete-orphan",
+    )
 
 
 class BurnShift(Base):
@@ -67,3 +71,21 @@ class BurnShift(Base):
     notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
     clamp: Mapped[Clamp] = relationship(back_populates="shifts")
+
+
+class OxygenReading(Base):
+    """烟囱测氧簿：焖烧期间按窑连续编号的氧含量记录。"""
+
+    __tablename__ = "oxygen_readings"
+    __table_args__ = (
+        UniqueConstraint("clamp_id", "seq", name="uq_oxygen_seq_per_clamp"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    clamp_id: Mapped[int] = mapped_column(ForeignKey("clamps.id"), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    oxygen_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    operator: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    clamp: Mapped[Clamp] = relationship(back_populates="oxygen_readings")

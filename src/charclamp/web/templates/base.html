@@ -17,6 +17,12 @@
           <small>{% block site_label %}乌石岗焖烧坞{% endblock %}</small>
         </div>
       </div>
+      <nav class="topnav" aria-label="主导航">
+        {% if user %}
+        <a class="topnav-link {% block nav_timeline_active %}{% endblock %}" href="/">焖烧时间轴</a>
+        <a class="topnav-link {% block nav_oxygen_active %}{% endblock %}" href="/oxygen/">烟囱测氧簿</a>
+        {% endif %}
+      </nav>
       <div class="topbar-actions">
         {% block top_actions %}{% endblock %}
         {% if user %}
