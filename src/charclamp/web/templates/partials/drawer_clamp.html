@@ -21,6 +21,8 @@
         hx-swap="innerHTML"
       >为本窑登记班次</button>
 
+      <a class="link-quiet" href="/oxygen?clamp_id={{ clamp.id }}">查看本窑测氧簿（已测 {{ oxygen_count }} 条）→</a>
+
       {% if clamp.status != 'drawn' %}
       <form method="post" action="/clamps/{{ clamp.id }}/status">
         <input type="hidden" name="status" value="drawn" />
@@ -31,7 +33,7 @@
       {% if not can_drawn %}
       <p class="hint warn">{{ drawn_msg }}</p>
       {% else %}
-      <p class="hint">最近班次峰值已达标（≥ 400℃），可标记出炭。</p>
+      <p class="hint">峰值与测氧两套门槛均已达标，可标记出炭。</p>
       {% endif %}
       {% else %}
       <form method="post" action="/clamps/{{ clamp.id }}/status">

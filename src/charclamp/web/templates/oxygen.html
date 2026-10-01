@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}测氧簿{% endblock %}
+{% block site_label %}{{ site_name }}{% endblock %}
+
+{% block content %}
+<header class="timeline-head">
+  <div>
+    <h1>烟囱测氧簿</h1>
+    <p>仅焖烧中的炭窑可登记测氧；测次从 1 起、同窑不得重复，氧百分须为正且不超过 21%。</p>
+  </div>
+</header>
+
+<div class="oxy-layout">
+  <section class="oxy-book" aria-label="按窑查阅测氧簿">
+    <form class="oxy-picker" method="get" action="/oxygen">
+      <label>按窑查簿
+        <select name="clamp_id" onchange="this.form.submit()">
+          {% for clamp in clamps %}
+          <option value="{{ clamp.id }}" {% if selected_clamp and selected_clamp.id == clamp.id %}selected{% endif %}>
+            {{ clamp.code }}（{{ status_labels.get(clamp.status, clamp.status) }}）
+          </option>
+          {% endfor %}
+        </select>
+      </label>
+      <noscript><button type="submit" class="btn ghost">查看</button></noscript>
+    </form>
+
+    {% if selected_clamp %}
+    <h2 class="oxy-book-title">
+      {{ selected_clamp.code }} · 簿页
+      <span class="badge">{{ readings|length }} 条</span>
+      <span class="badge badge-{{ selected_clamp.status }}">{{ status_labels.get(selected_clamp.status, selected_clamp.status) }}</span>
+    </h2>
+    <table class="oxy-table">
+      <thead>
+        <tr><th>测次</th><th>烟囱氧百分</th><th>采集时刻</th><th>当班人</th></tr>
+      </thead>
+      <tbody>
+        {% for r in readings %}
+        <tr>
+          <td>第 {{ r.seq }} 次</td>
+          <td>{{ '%.1f'|format(r.oxygen_percent) }}%</td>
+          <td><time datetime="{{ r.sampled_at.isoformat() }}">{{ r.sampled_at.strftime('%Y-%m-%d %H:%M') }}</time></td>
+          <td>{{ r.operator }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="oxy-empty">该窑暂无测氧记录。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="hint">窑场尚无炭窑。</p>
+    {% endif %}
+  </section>
+
+  <section class="oxy-form-card" aria-label="新增测氧">
+    <h2>新增测氧</h2>
+    {% if burning_clamps %}
+    <form class="oxy-form" method="post" action="/oxygen/new">
+      <label>炭窑（仅焖烧中可建簿）
+        <select name="clamp_id" required>
+          {% for clamp in burning_clamps %}
+          <option value="{{ clamp.id }}" {% if selected_clamp and selected_clamp.id == clamp.id %}selected{% endif %}>{{ clamp.code }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>测次（从 1 起，同窑不重复）
+        <input name="seq" type="number" min="1" step="1" value="{{ next_seq }}" required />
+      </label>
+      <label>烟囱氧百分 %（正数且 ≤ 21）
+        <input name="oxygen_percent" type="number" step="0.1" min="0.1" max="21" placeholder="如 7.5" required />
+      </label>
+      <label>采集时刻（留空取当前时间）
+        <input name="sampled_at" type="datetime-local" />
+      </label>
+      <label>当班人
+        <input name="operator" value="{{ user.username }}" required />
+      </label>
+      <div class="actions">
+        <button type="submit">登记测氧</button>
+      </div>
+    </form>
+    {% else %}
+    <p class="hint warn">当前没有焖烧中的炭窑，无法登记测氧。</p>
+    {% endif %}
+    <p class="hint">
+      出炭并行门槛：最近班次峰值 ≥ 400℃，且本簿测次从 1 起连续不少于 4 条、
+      最新氧百分 ≤ 8%、最新采集晚于最近一班开始时刻。两套门槛同时满足才可标记已出炭。
+    </p>
+  </section>
+</div>
+{% endblock %}

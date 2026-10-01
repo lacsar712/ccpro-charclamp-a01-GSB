@@ -8,10 +8,16 @@ from litestar.enums import RequestEncodingType
 from litestar.params import Body
 from litestar.response import Redirect, Template
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
-from charclamp.domain.models import BurnShift, Clamp, User
-from charclamp.domain.rules import RuleError, assert_can_set_clamp_status, can_mark_clamp_drawn
+from charclamp.domain.models import BurnShift, Clamp, OxygenReading, User, utcnow
+from charclamp.domain.rules import (
+    RuleError,
+    assert_can_set_clamp_status,
+    can_mark_clamp_drawn,
+    validate_oxygen_reading,
+)
 from charclamp.infra.db import SessionLocal
 from charclamp.infra.security import verify_password
 
@@ -53,7 +59,11 @@ async def _load_timeline_context(clamp_id: int | None = None) -> dict[str, Any]:
             (
                 await db.execute(
                     select(Clamp)
-                    .options(selectinload(Clamp.site), selectinload(Clamp.shifts))
+                    .options(
+                        selectinload(Clamp.site),
+                        selectinload(Clamp.shifts),
+                        selectinload(Clamp.oxygen_readings),
+                    )
                     .order_by(Clamp.code)
                 )
             )
@@ -73,6 +83,41 @@ async def _load_timeline_context(clamp_id: int | None = None) -> dict[str, Any]:
         "clamps": clamps,
         "shifts": shifts,
         "active_clamp_id": clamp_id,
+        "status_labels": STATUS_LABELS,
+        "site_name": site_name,
+        "oxygen_counts": {c.id: len(c.oxygen_readings) for c in clamps},
+    }
+
+
+async def _load_oxygen_context(clamp_id: int | None = None) -> dict[str, Any]:
+    async with SessionLocal() as db:
+        clamps = list(
+            (
+                await db.execute(
+                    select(Clamp)
+                    .options(selectinload(Clamp.site), selectinload(Clamp.oxygen_readings))
+                    .order_by(Clamp.code)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        site_name = clamps[0].site.name if clamps else "乌石岗焖烧坞"
+    selected: Clamp | None = None
+    if clamp_id is not None:
+        selected = next((c for c in clamps if c.id == clamp_id), None)
+    if selected is None:
+        selected = next((c for c in clamps if c.status == Clamp.STATUS_BURNING), None)
+    if selected is None and clamps:
+        selected = clamps[0]
+    readings = sorted(selected.oxygen_readings, key=lambda r: r.seq) if selected else []
+    next_seq = max((r.seq for r in readings), default=0) + 1
+    return {
+        "clamps": clamps,
+        "burning_clamps": [c for c in clamps if c.status == Clamp.STATUS_BURNING],
+        "selected_clamp": selected,
+        "readings": readings,
+        "next_seq": next_seq,
         "status_labels": STATUS_LABELS,
         "site_name": site_name,
     }
@@ -131,6 +176,7 @@ class TimelineController(Controller):
                 "user": request.user,
                 "flash": flash,
                 "flash_cat": flash_cat,
+                "active_nav": "timeline",
             },
         )
 
@@ -172,7 +218,11 @@ class TimelineController(Controller):
             result = await db.execute(
                 select(Clamp)
                 .where(Clamp.id == clamp_id)
-                .options(selectinload(Clamp.shifts), selectinload(Clamp.site))
+                .options(
+                    selectinload(Clamp.shifts),
+                    selectinload(Clamp.site),
+                    selectinload(Clamp.oxygen_readings),
+                )
             )
             clamp = result.scalar_one_or_none()
             if not clamp:
@@ -185,6 +235,7 @@ class TimelineController(Controller):
                 "status_labels": STATUS_LABELS,
                 "can_drawn": can_drawn,
                 "drawn_msg": drawn_msg,
+                "oxygen_count": len(clamp.oxygen_readings),
                 "user": request.user,
             },
         )
@@ -244,7 +295,7 @@ class ClampController(Controller):
             result = await db.execute(
                 select(Clamp)
                 .where(Clamp.id == clamp_id)
-                .options(selectinload(Clamp.shifts))
+                .options(selectinload(Clamp.shifts), selectinload(Clamp.oxygen_readings))
             )
             clamp = result.scalar_one_or_none()
             if not clamp:
@@ -257,3 +308,95 @@ class ClampController(Controller):
             except RuleError as exc:
                 _set_flash(request, str(exc), "error")
         return Redirect(f"/?clamp_id={clamp_id}")
+
+
+class OxygenController(Controller):
+    path = "/oxygen"
+    tags = ["oxygen"]
+
+    @get("/", media_type=MediaType.HTML)
+    async def oxygen_page(self, request: Request) -> Template | Redirect:
+        if not request.user:
+            return Redirect("/login")
+        flash, flash_cat = _pop_flash(request)
+        clamp_id = _parse_optional_int(request.query_params.get("clamp_id"))
+        ctx = await _load_oxygen_context(clamp_id)
+        return Template(
+            template_name="oxygen.html",
+            context={
+                **ctx,
+                "user": request.user,
+                "flash": flash,
+                "flash_cat": flash_cat,
+                "active_nav": "oxygen",
+            },
+        )
+
+    @post("/new")
+    async def create_reading(
+        self,
+        request: Request,
+        data: dict[str, Any] = Body(media_type=RequestEncodingType.URL_ENCODED),
+    ) -> Redirect:
+        if not request.user:
+            return Redirect("/login")
+        try:
+            clamp_id = int(data.get("clamp_id") or "")
+        except (TypeError, ValueError):
+            _set_flash(request, "缺少有效的炭窑，无法登记测氧", "error")
+            return Redirect("/oxygen")
+        try:
+            seq = int((data.get("seq") or "").strip())
+        except (TypeError, ValueError):
+            _set_flash(request, "测次须为整数，且从 1 起", "error")
+            return Redirect(f"/oxygen?clamp_id={clamp_id}")
+        try:
+            oxygen_percent = float((data.get("oxygen_percent") or "").strip())
+        except (TypeError, ValueError):
+            _set_flash(request, "烟囱氧百分须为数字", "error")
+            return Redirect(f"/oxygen?clamp_id={clamp_id}")
+        sampled_raw = (data.get("sampled_at") or "").strip()
+        try:
+            sampled_at = datetime.fromisoformat(sampled_raw) if sampled_raw else utcnow()
+        except ValueError:
+            _set_flash(request, "采集时刻格式不正确", "error")
+            return Redirect(f"/oxygen?clamp_id={clamp_id}")
+        operator = (data.get("operator") or "").strip() or request.user.username
+        async with SessionLocal() as db:
+            result = await db.execute(
+                select(Clamp)
+                .where(Clamp.id == clamp_id)
+                .options(selectinload(Clamp.oxygen_readings))
+            )
+            clamp = result.scalar_one_or_none()
+            if not clamp:
+                _set_flash(request, "炭窑不存在，无法登记测氧", "error")
+                return Redirect("/oxygen")
+            try:
+                validate_oxygen_reading(clamp, seq, oxygen_percent)
+            except RuleError as exc:
+                _set_flash(request, str(exc), "error")
+                return Redirect(f"/oxygen?clamp_id={clamp_id}")
+            clamp_code = clamp.code
+            db.add(
+                OxygenReading(
+                    clamp_id=clamp_id,
+                    seq=seq,
+                    oxygen_percent=oxygen_percent,
+                    sampled_at=sampled_at,
+                    operator=operator,
+                )
+            )
+            try:
+                await db.commit()
+            except IntegrityError:
+                # 两人同时交同一测次：唯一约束只放一笔落库，其余在此挡下。
+                await db.rollback()
+                _set_flash(
+                    request,
+                    f"窑 {clamp_code} 第 {seq} 次测氧刚被他人登记，本次提交被挡下，请刷新簿页核对测次",
+                    "error",
+                )
+                return Redirect(f"/oxygen?clamp_id={clamp_id}")
+        _set_flash(request, f"窑 {clamp_code} 第 {seq} 次测氧已登记", "ok")
+        return Redirect(f"/oxygen?clamp_id={clamp_id}")

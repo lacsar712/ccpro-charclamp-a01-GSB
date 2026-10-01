@@ -32,6 +32,9 @@
         <circle class="kiln-glow" cx="24" cy="34" r="4" />
         <text x="24" y="14" text-anchor="middle" class="kiln-code-svg">{{ clamp.code[-1] }}</text>
       </svg>
+      {% if oxygen_counts.get(clamp.id, 0) > 0 %}
+      <span class="oxy-count" title="已测氧 {{ oxygen_counts[clamp.id] }} 条">{{ oxygen_counts[clamp.id] }}</span>
+      {% endif %}
     </span>
     <span class="kiln-meta">
       <strong>{{ clamp.code }}</strong>

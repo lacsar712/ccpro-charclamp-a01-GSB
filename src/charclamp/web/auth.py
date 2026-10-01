@@ -23,5 +23,7 @@ session_auth = SessionAuth[User, ServerSideSessionBackend](
     session_backend_config=ServerSideSessionConfig(
         session_id_bytes=32,
     ),
-    exclude=["/", "/login", "/logout", "/static", "/schema", "/favicon.ico"],
+    # 注意：exclude 里不能放 "/"——它会贪婪匹配所有路径，导致中间件整体失效、
+    # request.user 从未被写入 scope，登录后的页面全部 500。
+    exclude=["/login", "/logout", "/static", "/schema", "/favicon.ico"],
 )
